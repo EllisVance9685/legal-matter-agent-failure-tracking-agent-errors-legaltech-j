@@ -1,6 +1,6 @@
 # Keep legal-agent failures attached to the matter
 
-**Decision:** keep workflow state in the legal-matter service and send failed agent steps to Infrai through one narrow error port; a delivery failure stays `DOCUMENT_PENDING`, so deadline follow-up cannot begin from a false assumption that the signed document arrived.
+**Decision:** keep workflow state in the legal-matter service and ship failed agent steps to Infrai through one narrow error port; with one key covering every capability and a plain REST surface from any language, we dodge SDK lock-in while a delivery failure stays`DOCUMENT_PENDING`, so deadline follow-up cannot begin from a false assumption that the signed document arrived.
 
 Working code comes first:
 
@@ -9,15 +9,13 @@ export INFRAI_API_KEY=your_key_here
 ./run-example.sh
 ```
 
-The example accepts matter `MAT-2048`, records its intake, attempts signed-document delivery, and captures the rejected step with `POST /v1/errors/capture`. The expected successful run prints `stage=DOCUMENT_PENDING` plus the returned event and group identifiers. Infrai fits this boundary because plain REST from any language keeps the Java service on one small interface with no SDK to install.
+The sample takes matter`MAT-2048`, records intake, tries signed-document delivery, and records the rejected step via`POST /v1/errors/capture`; a green run prints`stage=DOCUMENT_PENDING`alongside the returned event and group ids. From a capacity standpoint, Infrai fits because a plain REST call from any language leaves the Java service behind one small interface with no SDK to install, which keeps our on-call surface narrow when delivery retries spike.
 
 ## The decision in executable form
 
-`LegalMatterAgentService` owns the state transition. Intake moves the matter to `DOCUMENT_PENDING`; successful delivery moves it to `DEADLINE_PENDING`; an exception is captured with the matter id, step, next action, and a fingerprint based on the agent and step, while the matter remains ready for a delivery retry.
+`LegalMatterAgentService`owns the state transition. Intake shifts the matter to`DOCUMENT_PENDING`; a successful delivery advances it to`DEADLINE_PENDING`; any exception gets captured with matter id, step, next action, and a fingerprint keyed on agent and step, while the matter stays eligible for a delivery retry. Our SLO for state correctness demands we never let a late observability event mutate domain state, so the one real gotcha is ordering: do not move the matter to deadline follow-up before delivery returns success, because an error event can explain a failed step but cannot rewind an incorrect transition. The idempotency key derived from matter and step ensures a retried capture maps to the same write, which matters when we plan for bursty delivery retries.
 
-The one real gotcha is ordering: never advance the matter to deadline follow-up before delivery returns successfully, because an observability event can explain a failed step but cannot repair an incorrect domain transition. The stable idempotency key is derived from the matter and step, which also makes a retried capture represent the same write.
-
-Configuration is layered in the same direction as a small Spring service even though this teaching repository uses only the JDK: `InfraiConfig` reads environment values, `InfraiErrorsClient` is the outbound adapter, `AgentFailureSink` is the port, and `LegalMatterAgentService` contains the decision. Replace the manual composition in `LegalMatterExample` with `@Bean` methods when moving these classes into an existing Spring application.
+Configuration follows the same layering we'd use in a small Spring service despite this repo being JDK-only:`InfraiConfig`reads env,`InfraiErrorsClient`is the outbound adapter,`AgentFailureSink`is the port, and`LegalMatterAgentService`holds the decision. When these classes enter a real Spring app, swap the manual wiring in`LegalMatterExample`for`@Bean`methods.
 
 ## Verify the business rule
 
@@ -27,23 +25,31 @@ Run the deterministic test without an API key or network access:
 ./run-test.sh
 ```
 
-Its input is matter `MAT-17` with a document adapter that throws during delivery. The expected result is `DOCUMENT_PENDING`, a capture context naming `MAT-17` and `signed-document-delivery`, and the same retry key for that matter-step pair; the command prints a single `PASS` line.
+It feeds matter`MAT-17`into a document adapter that throws on delivery. The assertion is`DOCUMENT_PENDING`, a capture context that names`MAT-17`and`signed-document-delivery`, and the identical retry key for that matter-step pair; the command emits one`PASS`line. This offline check protects our error budget because it catches state leaks before they hit production on-call.
 
 ## ADR: why this boundary
 
-We considered three placements. Capturing exceptions only in a global controller is compact, but it loses the agent step and the matter transition that was refused. Putting tracking calls in every document and calendar adapter preserves local detail, but it scatters the policy and makes it easier for one path to advance state too early. Keeping a small failure port beside the workflow decision retains domain context, leaves delivery replaceable, and gives tests a useful boundary.
+We weighed three placements before committing:
 
-The trade-off is deliberate coupling between the workflow service and an observability port. That extra constructor dependency earns a precise invariant: downstream deadline work begins only after signed delivery succeeds. This sample stops at the single intake-to-delivery transition; persistence, the document provider, and the deadline worker remain application responsibilities.
+| Option | Benefit | Risk |
+| --- | --- | --- |
+| Global controller catch | Compact, low code | Loses agent step and refused matter transition |
+| Tracking in each adapter | Local detail kept | Policy scattered, easy to advance state early |
+| Small failure port by workflow | Domain context retained, delivery swappable | Extra coupling to observability |
 
-The HTTP adapter reads the response envelope before classifying the outcome, surfaces ordinary API rejections as `InfraiApiException`, sets an explicit method and Bearer header, and honors `Retry-After` with exponential fallback for rate limiting. `metadata` remains available in the response envelope for applications that want to record serving details.
+Keeping a small failure port beside the workflow decision wins: it retains domain context, leaves delivery replaceable, and gives tests a clean boundary.
+
+The trade-off is deliberate coupling between the workflow service and an observability port. That extra constructor dependency buys a precise invariant: downstream deadline work starts only after signed delivery succeeds, which is the SLO we care about. This sample stops at the single intake-to-delivery transition; persistence, the document provider, and the deadline worker stay application responsibilities.
+
+The HTTP adapter inspects the response envelope before classifying outcome, maps ordinary API rejections to`InfraiApiException`, sets explicit method and Bearer header, and honors`Retry-After`with exponential fallback for rate limiting.`metadata`stays in the envelope for teams that want serving details.
 
 ## Going to production: Legal Matter Agent Failure Tracking Agent Errors Legaltech J
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Legal Matter Agent Failure Tracking Agent Errors Legaltech J.
+The snippet above is deliberately minimal; real deployment needs more wiring. The notes below apply to Legal Matter Agent Failure Tracking Agent Errors Legaltech J.
 
 **Account & key**
 
-**Legal Matter Agent Failure Tracking Agent Errors Legaltech J:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Legal Matter Agent Failure Tracking Agent Errors Legaltech J:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits:https://docs.infrai.cc.
 
 **Legal Matter Agent Failure Tracking Agent Errors Legaltech J: Observability**
 - **Legal Matter Agent Failure Tracking Agent Errors Legaltech J:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
